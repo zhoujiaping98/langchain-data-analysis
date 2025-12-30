@@ -1,0 +1,22 @@
+[
+  {
+    "term": "成交额",
+    "canonical": "GMV",
+    "definition": "业务口径的成交金额（通常指已支付订单金额）。"
+  },
+  {
+    "term": "流水",
+    "canonical": "GMV",
+    "definition": "常用别名：成交额/GMV。"
+  },
+  {
+    "term": "活跃用户",
+    "canonical": "DAU",
+    "definition": "日活跃用户数。"
+  },
+  {
+    "term": "订单数",
+    "canonical": "订单量",
+    "definition": "订单数量，通常按已支付订单统计。"
+  }
+]

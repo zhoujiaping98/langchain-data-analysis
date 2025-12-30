@@ -1,0 +1,30 @@
+﻿[
+  {
+    "name": "basic_metric_last_week",
+    "query": "上周GMV",
+    "metric_key": "gmv",
+    "plan": {
+      "dimensions": [],
+      "filters": [],
+      "limit": 1000
+    },
+    "expected_sql": "SELECT SUM(gmv_amount) AS gmv FROM orders WHERE (ds >= '2025-01-01' AND ds < '2025-01-08') LIMIT 1000",
+    "expect": {
+      "risk_max_level": "medium"
+    }
+  },
+  {
+    "name": "metric_with_dim",
+    "query": "上周GMV按渠道",
+    "metric_key": "gmv",
+    "plan": {
+      "dimensions": ["channel"],
+      "filters": [],
+      "limit": 1000
+    },
+    "expected_sql": "SELECT channel, SUM(gmv_amount) AS gmv FROM orders WHERE (ds >= '2025-01-01' AND ds < '2025-01-08') GROUP BY channel LIMIT 1000",
+    "expect": {
+      "risk_max_level": "medium"
+    }
+  }
+]

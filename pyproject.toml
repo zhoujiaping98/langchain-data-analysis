@@ -1,0 +1,36 @@
+[project]
+name = "langchain-4layer-analytics-agent"
+version = "0.1.0"
+description = "LangChain-based 4-layer analytics agent for MySQL with Hybrid Router (cache + rules + RAG)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.30.0",
+  "pydantic>=2.7.0",
+  "pydantic-settings>=2.3.0",
+  "python-dotenv>=1.0.1",
+  "sqlalchemy>=2.0.30",
+  "pymysql>=1.1.1",
+  "sqlglot>=24.0.0",
+  "langchain>=0.2.10",
+  "langchain-community>=0.2.10",
+  "langchain-openai>=0.1.17",
+  "dashscope>=1.20.0",
+  "chromadb>=0.5.5",
+  "cachetools>=5.4.0",
+  "orjson>=3.10.0",
+  "rich>=13.7.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5.0",
+  "pytest>=8.2.0",
+  "httpx>=0.27.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "I", "UP", "B"]

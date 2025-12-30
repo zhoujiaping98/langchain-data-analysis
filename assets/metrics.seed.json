@@ -1,0 +1,44 @@
+[
+  {
+    "metric_key": "gmv",
+    "metric_name_zh": "GMV",
+    "description": "已支付订单总金额（不含退款），用于业务成交额统计。",
+    "fact_table": "orders",
+    "time_column": "paid_at",
+    "measure_expr": "SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)",
+    "default_filters": "status IN ('paid')",
+    "allowed_dims": [
+      "seller_region",
+      "channel",
+      "dt"
+    ]
+  },
+  {
+    "metric_key": "order_count",
+    "metric_name_zh": "订单量",
+    "description": "已支付订单数量。",
+    "fact_table": "orders",
+    "time_column": "paid_at",
+    "measure_expr": "COUNT(DISTINCT order_id)",
+    "default_filters": "status IN ('paid')",
+    "allowed_dims": [
+      "seller_region",
+      "channel",
+      "dt"
+    ]
+  },
+  {
+    "metric_key": "dau",
+    "metric_name_zh": "DAU",
+    "description": "日活跃用户数（按 events 表的去重用户）。",
+    "fact_table": "events",
+    "time_column": "event_date",
+    "measure_expr": "COUNT(DISTINCT user_id)",
+    "default_filters": "event_name='active'",
+    "allowed_dims": [
+      "seller_region",
+      "channel",
+      "event_date"
+    ]
+  }
+]
