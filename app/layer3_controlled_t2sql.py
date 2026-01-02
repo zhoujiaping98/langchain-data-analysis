@@ -2,21 +2,20 @@
 
 import json
 import re
-import asyncio
 import threading
+import logging
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
-from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
 
 from pydantic import BaseModel, Field
 import sqlglot
 from sqlglot import exp
+from sqlalchemy import text
 
 from .assets import get_metric
 from .config import settings
 from .db import explain, fetch_all, get_engine
-from .layer2_risk import assess_post_risk, validate_select_only
+from .layer2_risk import assess_post_risk, validate_select_only, RiskAssessment
 from .llm import get_llm
 from .sql_compiler import compile_metric_sql
 from .time_parser import infer_time_range, TimeRange
@@ -39,12 +38,6 @@ class ExecutionPlan:
     post_risk: dict
     rows: list[dict]
     is_schema_guided: bool = False  # 标识是否使用了schema prompting
-
-
-# 全局缓存和锁
-_schema_cache = None
-_schema_cache_lock = threading.Lock()
-_schema_cache_time = None
 
 
 class DatabaseSchemaCache:
@@ -84,6 +77,7 @@ class DatabaseSchemaCache:
 
 # 创建全局schema缓存实例
 _schema_cache_manager = DatabaseSchemaCache(cache_ttl=1800)  # 缓存30分钟
+_logger = logging.getLogger(__name__)
 
 
 def get_database_schema() -> Dict[str, Any]:
@@ -104,27 +98,22 @@ def get_database_schema() -> Dict[str, Any]:
         eng = get_engine()
         with eng.connect() as conn:
             # 获取所有表名
-            result = conn.execute("SHOW TABLES")
+            result = conn.execute(text("SHOW TABLES"))
             tables = [row[0] for row in result.fetchall()]
 
-            # 使用线程池并发获取表结构，提升性能
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = []
-                for table_name in tables:
-                    future = executor.submit(_get_table_schema, conn, table_name)
-                    futures.append((table_name, future))
-
-                for table_name, future in futures:
-                    try:
-                        table_info = future.result(timeout=5)  # 5秒超时
-                        if table_info:
-                            schema_info["tables"][table_name] = table_info
-                            # 收集所有列名
-                            for col in table_info["columns"]:
-                                schema_info["all_columns"].add(col["name"])
-                    except Exception as e:
-                        print(f"获取表 {table_name} 结构失败: {e}")
-                        continue
+            # 串行拉取，避免连接池压力与线程超时泄漏
+            for table_name in tables:
+                try:
+                    table_info = _get_table_schema(conn, table_name)
+                    if table_info:
+                        schema_info["tables"][table_name] = table_info
+                        # 收集所有列名
+                        for col in table_info["columns"]:
+                            name = col["name"]
+                            schema_info["all_columns"].add(str(name).lower())
+                except Exception as e:
+                    _logger.warning("获取表 %s 结构失败: %s", table_name, e)
+                    continue
 
             # 转换set为list以便JSON序列化
             schema_info["all_columns"] = list(schema_info["all_columns"])
@@ -133,7 +122,7 @@ def get_database_schema() -> Dict[str, Any]:
             _schema_cache_manager.update_schema(schema_info)
 
     except Exception as e:
-        print(f"获取数据库Schema失败: {e}")
+        _logger.exception("获取数据库Schema失败: %s", e)
         # 返回空的schema信息而不是崩溃
         return {
             "tables": {},
@@ -144,10 +133,15 @@ def get_database_schema() -> Dict[str, Any]:
     return schema_info
 
 
+def _quote_identifier(name: str) -> str:
+    safe = name.replace("`", "``")
+    return f"`{safe}`"
+
+
 def _get_table_schema(conn, table_name: str) -> Optional[Dict[str, Any]]:
     """获取单个表的结构信息"""
     try:
-        desc_result = conn.execute(f"DESCRIBE {table_name}")
+        desc_result = conn.execute(text(f"DESCRIBE {_quote_identifier(table_name)}"))
         columns = desc_result.fetchall()
 
         table_info = {
@@ -174,7 +168,7 @@ def _get_table_schema(conn, table_name: str) -> Optional[Dict[str, Any]]:
         return table_info
 
     except Exception as e:
-        print(f"获取表 {table_name} 结构时出错: {e}")
+        _logger.warning("获取表 %s 结构时出错: %s", table_name, e)
         return None
 
 
@@ -208,6 +202,22 @@ def build_schema_prompt(schema_info: Dict[str, Any]) -> str:
     prompt += "6. # 注释标识了字段的业务语义推断，请参考但不要完全依赖\n"
 
     return prompt
+
+
+def _filter_schema(schema_info: Dict[str, Any], tables: List[str]) -> Dict[str, Any]:
+    if not tables:
+        return schema_info
+    out = {"tables": {}, "all_columns": [], "table_relationships": {}}
+    for t in tables:
+        info = schema_info.get("tables", {}).get(t)
+        if not info:
+            continue
+        out["tables"][t] = info
+        for col in info.get("columns", []):
+            name = col.get("name")
+            if name:
+                out["all_columns"].append(name)
+    return out
 
 
 def _infer_field_semantics(field_name: str) -> str:
@@ -286,15 +296,51 @@ def get_similar_queries(query: str, limit: int = 3) -> List[Dict[str, Any]]:
     return [
         {
             "query": "最近30天的订单数量",
-            "sql": "SELECT COUNT(*) as order_count FROM orders WHERE create_time >= DATE_SUB(NOW(), INTERVAL 30 DAY)",
-            "explanation": "查询最近30天的订单总数"
+            "intent": {
+                "primary_metric": "order_count",
+                "dimensions": [],
+                "filters": ["create_time >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)"],
+                "limit": 1000,
+            },
+            "explanation": "查询最近30天的订单总数（意图示例）",
         },
         {
             "query": "各部门平均薪资",
-            "sql": "SELECT department, AVG(salary) as avg_salary FROM employees GROUP BY department",
-            "explanation": "按部门统计平均薪资"
+            "intent": {
+                "primary_metric": "avg_salary",
+                "dimensions": ["department"],
+                "filters": [],
+                "limit": 1000,
+            },
+            "explanation": "按部门统计平均薪资（意图示例）",
         }
     ]
+
+
+def route_tables(query: str, schema_info: Dict[str, Any], top_k: int = 1) -> List[str]:
+    """轻量表路由：按表名/字段名匹配简单打分"""
+    q = (query or "").lower()
+    if not q or not schema_info.get("tables"):
+        return []
+
+    scores: list[tuple[str, int]] = []
+    for table, info in schema_info["tables"].items():
+        score = 0
+        if table.lower() in q:
+            score += 2
+        for col in info.get("columns", []):
+            name = str(col.get("name") or "").lower()
+            if name and name in q:
+                score += 1
+        if score > 0:
+            scores.append((table, score))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    if not scores:
+        return []
+    if len(scores) > 1 and (scores[0][1] - scores[1][1]) < 1:
+        return []
+    return [t for t, _ in scores[:top_k]]
 
 
 def _extract_json_robust(text: str) -> dict | None:
@@ -377,6 +423,10 @@ def _normalize_filters(filters: list[str], metric, time_range: TimeRange | None)
         return []
     default_filters = (metric.default_filters or "").lower()
     time_cols = {metric.time_column.lower(), "dt"}
+    allowed_cols = set(metric.allowed_dims or [])
+    allowed_cols.update(time_cols)
+    allowed_cols.update(_filter_columns(metric.default_filters or ""))
+    allowed_cols.update(_filter_columns(metric.measure_expr or ""))
 
     # 定义需要过滤掉的时间相关但非数据库列的关键词
     invalid_time_filters = {
@@ -389,6 +439,10 @@ def _normalize_filters(filters: list[str], metric, time_range: TimeRange | None)
     for f in filters:
         f_lower = f.lower()
         cols = _filter_columns(f)
+        if cols and not cols.issubset({c.lower() for c in allowed_cols}):
+            continue
+        if not _filter_is_safe(f):
+            continue
 
         # 跳过真正的数据库时间列过滤
         if cols & time_cols:
@@ -426,9 +480,15 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
     )
 
     # 如果启用Schema Prompting，添加数据库结构信息
+    schema_info_full = None
     if use_schema:
-        schema_info = get_database_schema()
-        schema_prompt = build_schema_prompt(schema_info)
+        schema_info_full = get_database_schema()
+        prompt_schema = schema_info_full
+        if not hinted_metric:
+            candidate_tables = route_tables(query, schema_info_full, top_k=1)
+            if candidate_tables:
+                prompt_schema = _filter_schema(schema_info_full, candidate_tables)
+        schema_prompt = build_schema_prompt(prompt_schema)
         sys_prompt += f"\n{schema_prompt}\n"
 
     # 构建用户输入
@@ -446,7 +506,7 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
         for i, example in enumerate(examples):
             sys_prompt += f"示例{i + 1}:\n"
             sys_prompt += f"查询: {example['query']}\n"
-            sys_prompt += f"SQL: {example['sql']}\n"
+            sys_prompt += f"意图JSON: {json.dumps(example['intent'], ensure_ascii=False)}\n"
             sys_prompt += f"说明: {example['explanation']}\n\n"
 
     # 添加基于可用维度的智能示例（如果允许维度不为空）
@@ -479,6 +539,8 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
     if raw.get("limit") is None:
         raw.pop("limit", None)
 
+    if "sql_confidence" not in raw:
+        raw["sql_confidence"] = 0.5
     # 创建QueryPlan对象
     qp = QueryPlan(**raw)
 
@@ -490,11 +552,14 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
     if allowed_dims:
         qp.dimensions = [d for d in qp.dimensions if d in set(allowed_dims)]
 
-    # 验证建议的表是否存在
-    if qp.suggested_tables and use_schema:
-        schema_info = get_database_schema()
+    # 验证建议的表是否存在，必要时做表路由兜底
+    if use_schema:
+        schema_info = schema_info_full or get_database_schema()
         available_tables = set(schema_info["tables"].keys())
-        qp.suggested_tables = [t for t in qp.suggested_tables if t in available_tables]
+        if qp.suggested_tables:
+            qp.suggested_tables = [t for t in qp.suggested_tables if t in available_tables]
+        if not qp.suggested_tables:
+            qp.suggested_tables = route_tables(query, schema_info, top_k=1)
 
     qp.limit = min(int(qp.limit or 1000), settings.max_rows)
 
@@ -509,9 +574,7 @@ def plan_with_llm(query: str, hinted_metric: str | None, allowed_dims: list[str]
 def generate_sql_from_plan(query: str, plan: QueryPlan) -> str:
     """根据QueryPlan生成SQL（无预设指标约束）"""
     if not plan.suggested_tables:
-        # 如果没有建议表，尝试从常见业务表推断
-        common_tables = ["orders", "users", "products", "employees", "material_bom_list_info"]
-        plan.suggested_tables = common_tables[:2]  # 默认使用前两个表
+        raise ValueError("无法确定查询表，请明确业务对象或表名。")
 
     # 构建SQL生成提示词
     sql_prompt = (
@@ -563,6 +626,14 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
         use_schema=True,  # 启用Schema Prompting
         use_examples=not hinted_metric  # 未配置指标时使用示例
     )
+    if plan.sql_confidence < settings.l3_min_sql_confidence:
+        raise ValueError("SQL 置信度过低，已阻止执行（仅提供意图解析）。")
+    schema_info = get_database_schema()
+    if plan.suggested_tables:
+        allowed_cols = _allowed_columns_for_tables(schema_info, plan.suggested_tables)
+    else:
+        allowed_cols = set(schema_info.get("all_columns") or [])
+    plan.filters = _sanitize_filters(plan.filters, allowed_cols if allowed_cols else None)
 
     # 根据是否有预设指标选择生成方式
     if metric:
@@ -587,18 +658,30 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
         # 验证生成的SQL
         if not sql.upper().startswith("SELECT"):
             raise ValueError("生成的SQL必须为SELECT查询")
+        _enforce_single_table(sql)
+        _ensure_time_range(sql, tr)
 
     # SQL验证和修复循环
     for _ in range(settings.max_repair_rounds + 1):
-        ok, reasons = validate_select_only(sql)
+        ok, reasons, _ = validate_select_only(sql)
         if ok:
             break
         sql = repair_sql_with_llm(sql, "; ".join(reasons))
 
+    sql = _ensure_limit(sql, plan.limit)
+    if not metric:
+        _enforce_single_table(sql)
+        _ensure_time_range(sql, tr)
     # 风险评估
     post = assess_post_risk(sql)
     if post.action == "block":
         raise ValueError("SQL 风险过高，已阻止执行：" + "; ".join(post.reasons))
+    if plan.sql_confidence < settings.l3_require_confirmation_sql_confidence and post.level == "low":
+        post = RiskAssessment(
+            level="medium",
+            action="require_confirmation",
+            reasons=["SQL置信度偏低，需人工确认"],
+        )
 
     # 执行查询
     exp_rows = explain(sql)
@@ -633,6 +716,101 @@ def repair_sql_with_llm(sql: str, error: str) -> str:
     txt = resp.content if hasattr(resp, "content") else str(resp)
     txt = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", txt.strip())
     return txt.strip()
+
+
+def _ensure_limit(sql: str, limit: int) -> str:
+    cleaned = sql.strip().rstrip(";")
+    try:
+        ast = sqlglot.parse_one(cleaned, dialect="mysql")
+    except Exception:
+        return f"{cleaned}\nLIMIT {limit}"
+    max_limit = min(int(limit), settings.max_rows)
+    existing = None
+    lim = ast.find(exp.Limit)
+    if lim and isinstance(lim.this, exp.Literal) and lim.this.is_number:
+        try:
+            existing = int(lim.this.this)
+        except Exception:
+            existing = None
+    if existing is not None:
+        max_limit = min(max_limit, existing)
+    if list(ast.find_all(exp.Limit)) or list(ast.find_all(exp.Fetch)):
+        if isinstance(ast, exp.Select):
+            ast.set("limit", exp.Limit(this=exp.Literal.number(max_limit)))
+            return ast.sql(dialect="mysql")
+        if isinstance(ast, (exp.Union, exp.With, exp.Intersect, exp.Except)):
+            wrapped = exp.select("*").from_(exp.Subquery(this=ast).as_("t")).limit(max_limit)
+            return wrapped.sql(dialect="mysql")
+        return cleaned
+    if isinstance(ast, exp.Select):
+        ast.set("limit", exp.Limit(this=exp.Literal.number(max_limit)))
+        return ast.sql(dialect="mysql")
+    if isinstance(ast, (exp.Union, exp.With, exp.Intersect, exp.Except)):
+        wrapped = exp.select("*").from_(exp.Subquery(this=ast).as_("t")).limit(max_limit)
+        return wrapped.sql(dialect="mysql")
+    return f"{cleaned}\nLIMIT {max_limit}"
+
+
+def _filter_is_safe(expr: str) -> bool:
+    if not expr:
+        return False
+    try:
+        ast = sqlglot.parse_one(f"SELECT 1 FROM t WHERE {expr}", dialect="mysql")
+    except Exception:
+        return False
+    where = ast.args.get("where")
+    if not where:
+        return False
+    disallowed = (exp.Or, exp.Subquery, exp.Select, exp.Union, exp.Join, exp.Case)
+    if any(where.find_all(disallowed)):
+        return False
+    allowed = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In, exp.Like, exp.Between, exp.Is, exp.IsNot)
+    if not any(where.find_all(allowed)):
+        return False
+    return True
+
+
+def _sanitize_filters(filters: list[str], allowed_cols: set[str] | None) -> list[str]:
+    if not filters:
+        return []
+    out: list[str] = []
+    for f in filters:
+        if not _filter_is_safe(f):
+            continue
+        cols = _filter_columns(f)
+        if allowed_cols and cols and not cols.issubset({c.lower() for c in allowed_cols}):
+            continue
+        out.append(f)
+    return out
+
+
+def _allowed_columns_for_tables(schema_info: Dict[str, Any], tables: List[str]) -> set[str]:
+    cols: set[str] = set()
+    for t in tables:
+        info = schema_info.get("tables", {}).get(t)
+        if not info:
+            continue
+        for col in info.get("columns", []):
+            name = col.get("name")
+            if name:
+                cols.add(str(name).lower())
+    return cols
+
+
+def _enforce_single_table(sql: str) -> None:
+    ast = sqlglot.parse_one(sql, dialect="mysql")
+    tables = {t.name.lower() for t in ast.find_all(exp.Table) if getattr(t, "name", None)}
+    if len(tables) != 1:
+        raise ValueError("无指标模式仅允许单表查询")
+    if list(ast.find_all(exp.Join)) or list(ast.find_all(exp.Subquery)) or list(ast.find_all(exp.Union)) or list(ast.find_all(exp.With)):
+        raise ValueError("无指标模式禁止 JOIN/子查询/UNION/CTE")
+
+
+def _ensure_time_range(sql: str, tr: TimeRange) -> None:
+    if not tr:
+        return
+    if tr.start not in sql or tr.end_exclusive not in sql:
+        raise ValueError("无指标模式必须包含时间范围条件")
 
 
 def refresh_schema_cache():

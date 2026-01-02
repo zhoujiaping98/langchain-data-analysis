@@ -1,9 +1,9 @@
 ﻿from __future__ import annotations
 
-import re
 import math
+import re
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional
+from typing import Optional
 
 from cachetools import TTLCache
 
@@ -15,7 +15,7 @@ from .vector_index import retrieve_semantic_assets
 @dataclass
 class Candidate:
     metric_key: str
-    score: float
+    score: float  # unified to 0~1 for comparison
     reason: str
     missing_slots: list[str]
 
@@ -23,7 +23,7 @@ class Candidate:
 @dataclass
 class MatchResult:
     route: str  # TEMPLATE | CONTROLLED_T2SQL | ASK_CLARIFY | BLOCK
-    confidence: float
+    confidence: float  # unified 0~1
     best_metric: str | None
     candidates: list[Candidate]
     normalized_query: str
@@ -32,69 +32,64 @@ class MatchResult:
 
 
 class HybridRouter:
-    """层：Hybrid Router（缓存→规则/词典→RAG）"""
+    """Layer1: Hybrid Router（缓存→规则/词典→RAG）"""
 
     def __init__(self):
         self.cache = TTLCache(maxsize=4096, ttl=3600)
 
         self._metrics = list_active_metrics()
-        self._metric_keywords: dict[str, str] = {}
         self._metric_trigger_keywords: dict[str, list[str]] = {}
 
-        # 构建关键词映射和触发词映射
         for m in self._metrics:
-            # 基础关键词映射
-            self._metric_keywords[m.metric_key.lower()] = m.metric_key
-            if m.metric_name_zh:
-                self._metric_keywords[m.metric_name_zh] = m.metric_key
+            name_keywords: list[str] = []
+            if m.metric_key:
+                name_keywords.append(m.metric_key)
+            if getattr(m, "metric_name_zh", None):
+                name_keywords.append(str(m.metric_name_zh))
 
-            # 触发关键词映射（从配置文件加载）
-            if hasattr(m, 'trigger_keywords') and m.trigger_keywords:
-                trigger_keywords = m.trigger_keywords or []
-                self._metric_trigger_keywords[m.metric_key] = trigger_keywords
-                for kw in trigger_keywords:
-                    self._metric_keywords[kw.lower()] = m.metric_key
+            if hasattr(m, "trigger_keywords") and m.trigger_keywords:
+                kws = m.trigger_keywords or []
+                # keep only valid strings
+                kws = [kw for kw in kws if isinstance(kw, str) and kw.strip()]
+                if kws:
+                    self._metric_trigger_keywords[m.metric_key] = kws
+                elif name_keywords:
+                    self._metric_trigger_keywords[m.metric_key] = name_keywords
+            elif name_keywords:
+                self._metric_trigger_keywords[m.metric_key] = name_keywords
 
         self._terms = term_registry()
+
+        # time detection stays lightweight in router
         self._time_patterns = [
             r"上周|本周|上个月|本月|今年|去年|最近\s*\d+\s*天|近\s*\d+\s*天|\d{4}-\d{2}-\d{2}",
             r"过去\s*\d+\s*天|过去\s*\d+\s*个月|过去\s*\d+\s*年|过去\s*一个月|过去\s*一年",
             r"最近\s*一个月|最近\s*一年|上\s*\d+\s*个月|上\s*\d+\s*年",
         ]
 
-        # 否定词列表
-        self._negative_words = ["不", "非", "不是", "无", "没有", "未", "别", "非", "排除", "除", "除了"]
+        # strong negation only (do not include "除了/排除")
+        self._negative_words = ["不", "非", "不是", "无", "没有", "未", "别"]
 
-        # 敏感词黑名单
-        self._blacklist_keywords = [
-            "删除", "drop", "delete", "password", "密码", "身份证", "credit_card",
-            "信用卡", "ssn", "社保", "私人", "隐私", "保密", "敏感", "内部"
-        ]
+        # BLOCK should be conservative: only obvious SQL injection / write attempts
+        self._write_keywords = ["drop", "delete", "update", "insert", "alter", "truncate", "replace"]
+        self._sql_shape_keywords = ["select", "from", "where", "join", "union", "into", "values", "table"]
 
-        # 构建配置化的关键词集合，用于词边界匹配判断
-        self._all_trigger_keywords = set()
-        for trigger_keywords in self._metric_trigger_keywords.values():
-            self._all_trigger_keywords.update(trigger_keywords)
-
-        # 构建意图关键词集合（从配置中动态提取）
+        # intent re-rank keywords (no score changes)
         self._money_keywords = set()
         self._count_keywords = set()
-
-        # 从GMV相关指标提取金额关键词
         if "gmv" in self._metric_trigger_keywords:
-            self._money_keywords.update(self._metric_trigger_keywords["gmv"])
-
-        # 从订单相关指标提取数量关键词
+            self._money_keywords.update([k.lower() for k in self._metric_trigger_keywords["gmv"]])
         if "order_count" in self._metric_trigger_keywords:
             self._count_keywords.update(self._metric_trigger_keywords["order_count"])
-
-        # 添加通用的数量相关关键词
         self._count_keywords.update(["数量", "次数", "笔数"])
-        # 添加通用的金额相关关键词
         self._money_keywords.update(["金额", "总额", "总金额"])
 
+    # -----------------------------
+    # Normalization & helpers
+    # -----------------------------
+
     def normalize(self, query: str) -> str:
-        q = query.strip()
+        q = (query or "").strip()
         for term, canonical in self._terms.items():
             if term and term in q:
                 q = q.replace(term, canonical)
@@ -103,110 +98,116 @@ class HybridRouter:
     def _has_time(self, q: str) -> bool:
         return any(re.search(p, q) for p in self._time_patterns)
 
+    def _clone_candidates(self, candidates: list[Candidate]) -> list[Candidate]:
+        return [
+            Candidate(
+                metric_key=c.metric_key,
+                score=float(c.score),
+                reason=c.reason,
+                missing_slots=list(c.missing_slots),
+            )
+            for c in candidates
+        ]
+
     def _has_negative_words(self, q: str, keyword: str) -> bool:
-        """检查关键词前是否有否定词"""
-        # 使用正则表达式查找否定词 + 关键词的模式
+        # negation + keyword
         pattern = rf"({'|'.join(self._negative_words)})\s*{re.escape(keyword)}"
         return bool(re.search(pattern, q))
 
     def _word_boundary_match(self, text: str, keyword: str) -> bool:
-        """使用词边界进行匹配，避免子串误匹配"""
-        # 检查是否包含关键词
-        if keyword not in text:
+        """Boundary for alnum keywords; direct contains for pure Chinese keywords."""
+        if not keyword:
             return False
-
-        pos = text.find(keyword)
-        if pos < 0:
-            return False
-
-        # 获取前后字符
-        before_char = text[pos - 1] if pos > 0 else ""
-        after_char = text[pos + len(keyword)] if pos + len(keyword) < len(text) else ""
-
-        # 检查是否为词边界的辅助函数
-        def is_chinese_char(char):
-            """检查字符是否为中文"""
-            return ord(char) >= 0x4e00 and ord(char) <= 0x9fff
-
-        def is_english_letter(char):
-            """检查字符是否为英文字母"""
-            return char.isalpha() and ord(char) < 128
-
-        def is_digit(char):
-            """检查字符是否为数字"""
-            return char.isdigit()
-
-        # 判断关键词是否为中文
-        keyword_is_chinese = all(is_chinese_char(c) for c in keyword if c)
-
-        # 基于配置化的触发关键词进行特殊处理
-        if keyword in self._all_trigger_keywords:
-            # 对于英文关键词，中文字符不算边界
-            if keyword.lower() == 'bom':
-                # BOM前面如果是中文是OK的，后面如果是中文也是OK的
-                before_ok = True  # BOM前面通常是中文
-                after_ok = True  # BOM后面通常是中文
-                # 但是如果是连续字母数字则不算边界
-                if before_char and before_char.isalnum() and not is_chinese_char(before_char):
-                    before_ok = False
-                if after_char and after_char.isalnum() and not is_chinese_char(after_char):
-                    after_ok = False
-                return before_ok or after_ok
-
-            # 对于中文关键词
-            if keyword_is_chinese:
-                # 中文关键词前后如果是字母数字或英文则不算边界
-                before_ok = not (before_char.isalnum() and (is_english_letter(before_char) or is_digit(before_char)))
-                after_ok = not (after_char.isalnum() and (is_english_letter(after_char) or is_digit(after_char)))
-                return before_ok or after_ok
-
-        # 对于其他关键词，使用简单包含匹配
+        # if keyword contains ascii letters/digits -> strict boundary
+        if re.search(r"[A-Za-z0-9]", keyword):
+            pattern = rf"(?<![A-Za-z0-9]){re.escape(keyword)}(?![A-Za-z0-9])"
+            return bool(re.search(pattern, text, re.IGNORECASE))
+        # chinese -> contains is OK
         return keyword in text
 
-    def _normalize_rag_score(self, rag_score: float) -> float:
-        """将RAG分数归一化到0.6-0.95区间，与Rule分数可比"""
-        # 处理负数分数和异常值
-        if rag_score < -100:  # 非常低的分数，直接设置为最低置信度
-            return 0.6
+    def _normalize_score_to_01(self, score: float) -> float:
+        """
+        Make score comparable (0..1).
+        If already 0..1, keep; otherwise squash with abs-based transform + sigmoid.
+        """
+        try:
+            s = float(score)
+        except Exception:
+            return 0.0
+        if -1.0 <= s <= 1.0:
+            if s <= 0.0:
+                return 0.0
+            return min(1.0, s)
+        if 0.0 <= s <= 1.0:
+            return max(0.0, min(1.0, s))
+        base = 1.0 / (1.0 + abs(s))  # (0,1]
+        # sigmoid sharpen around 0.5
+        norm = 1.0 / (1.0 + math.exp(-12.0 * (base - 0.5)))
+        return max(0.0, min(1.0, norm))
 
-        # 使用sigmoid函数进行归一化，将-200到0的分数映射到0.6-0.95
-        # 首先将分数映射到0-1区间
-        normalized_input = (rag_score + 200) / 200  # 将-200到0映射到0到1
-        normalized_input = max(0, min(1, normalized_input))  # 确保在0-1范围内
+    def _rag_conf_with_gap(self, scores01: list[float]) -> float:
+        """
+        scores01 are normalized to 0..1 (higher better), sorted desc.
+        conf = top1 + alpha * gap, clamped
+        """
+        if not scores01:
+            return 0.0
+        top1 = scores01[0]
+        top2 = scores01[1] if len(scores01) > 1 else 0.0
+        gap = max(0.0, top1 - top2)
+        # alpha chosen to give meaningful boost when gap is clear
+        alpha = 0.25
+        conf = top1 + alpha * min(gap, 0.2) / 0.2  # gap cap at 0.2
+        return max(0.0, min(1.0, conf))
 
-        # 使用sigmoid函数
-        normalized = 0.6 + 0.35 * (1 / (1 + math.exp(-10 * (normalized_input - 0.5))))
-        return min(0.95, max(0.6, normalized))
-
-    def _intent_boost(self, q: str, candidates: list[Candidate]) -> None:
+    def _intent_rerank(self, q: str, candidates: list[Candidate]) -> None:
+        """Only rerank; do NOT change scores."""
         if not candidates:
             return
-
         q_lower = q.lower()
-        # 使用配置化的意图关键词
-        want_gmv = any(k.lower() in q_lower for k in self._money_keywords)
+
+        want_gmv = any(k in q_lower for k in self._money_keywords)
         want_count = any(k in q for k in self._count_keywords)
 
-        for c in candidates:
-            if want_gmv and c.metric_key == "gmv":
-                c.score += 0.08
-            if want_count and c.metric_key in {"order_count", "count"}:
-                c.score += 0.06
+        def move_first(pred):
+            for i, c in enumerate(candidates):
+                if pred(c):
+                    candidates.insert(0, candidates.pop(i))
+                    return
 
         if want_gmv:
-            for i, c in enumerate(candidates):
-                if c.metric_key == "gmv":
-                    candidates.insert(0, candidates.pop(i))
-                    break
+            move_first(lambda c: c.metric_key == "gmv")
+        if want_count:
+            move_first(lambda c: c.metric_key in {"order_count", "count"})
 
-    def _check_blacklist(self, query: str) -> bool:
-        """检查查询是否包含敏感词，需要阻断"""
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in self._blacklist_keywords)
+    def _should_block(self, query: str) -> bool:
+        """
+        Conservative block:
+        - obvious write keyword, OR
+        - looks like SQL + contains comment/multi-statement tokens
+        """
+        q = (query or "").lower()
+
+        # obvious write keyword appears as word boundary
+        for kw in self._write_keywords:
+            if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", q):
+                return True
+
+        # "SQL-shaped" + suspicious tokens
+        looks_sql = any(k in q for k in self._sql_shape_keywords)
+        suspicious = (";" in q) or ("--" in q) or ("/*" in q) or ("*/" in q)
+        if looks_sql and suspicious:
+            return True
+
+        return False
+
+    # -----------------------------
+    # Main route
+    # -----------------------------
 
     def route(self, query: str, user_id: str, role: str) -> MatchResult:
-        # 1. 首先检查黑名单
-        if self._check_blacklist(query):
+        # 1) block check
+        if self._should_block(query):
             return MatchResult(
                 route="BLOCK",
                 confidence=1.0,
@@ -214,63 +215,77 @@ class HybridRouter:
                 candidates=[],
                 normalized_query=query,
                 missing_slots=[],
-                explanations=["查询包含敏感词汇，已被安全策略阻断"]
+                explanations=["疑似写操作/注入形态，已被安全策略阻断"],
             )
 
         q = self.normalize(query)
         cache_key = f"{user_id}:{role}:{q}"
-        if cache_key in self.cache:
-            cached = self.cache[cache_key]
-            if cached.candidates:
-                self._intent_boost(q, cached.candidates)
-                cached.candidates = sorted(cached.candidates, key=lambda x: x.score, reverse=True)
-                cached.best_metric = cached.candidates[0].metric_key
-            return cached
 
-        # 2. 规则匹配
+        # 2) cache
+        if cache_key in self.cache:
+            cached: MatchResult = self.cache[cache_key]
+            candidates = self._clone_candidates(cached.candidates)
+            self._intent_rerank(q, candidates)
+            # keep stable sorting by score desc
+            candidates = sorted(candidates, key=lambda x: x.score, reverse=True)
+            self._intent_rerank(q, candidates)
+
+            best_metric = candidates[0].metric_key if candidates else cached.best_metric
+            confidence = cached.confidence
+
+            return MatchResult(
+                route=cached.route,
+                confidence=confidence,
+                best_metric=best_metric,
+                candidates=candidates,
+                normalized_query=cached.normalized_query,
+                missing_slots=list(cached.missing_slots),
+                explanations=list(cached.explanations),
+            )
+
+        # 3) rule match
         rule = self._rule_match(q)
-        if rule and rule.confidence >= settings.router_conf_rule:
+        if rule and rule.confidence >= float(settings.router_conf_rule):
             self.cache[cache_key] = rule
             return rule
 
-        # 3. RAG匹配（带归一化置信度）
-        rag = self._rag_match(q)
-        if rag:
-            # 对RAG分数进行归一化
-            rag.confidence = self._normalize_rag_score(rag.confidence)
-            if rag.confidence >= settings.router_conf_rag:
-                self.cache[cache_key] = rag
-                return rag
+        # 4) rag match (returns candidates only, normalized to 0..1)
+        rag_candidates, rag_conf = self._rag_candidates_and_conf(q)
 
-        # 4. 处理fallback情况
-        missing = []
+        # 5) fallback assemble
+        missing: list[str] = []
         if not self._has_time(q):
             missing.append("time_range")
 
-        candidates = []
-        if rag:
-            candidates.extend(rag.candidates)
+        candidates: list[Candidate] = []
         if rule:
             candidates.extend(rule.candidates)
+        if rag_candidates:
+            candidates.extend(rag_candidates)
 
-        # 去重并保留最高分数的候选
-        best_by_key = {}
+        # dedupe by metric_key keep best score
+        best_by_key: dict[str, Candidate] = {}
         for c in candidates:
             if c.metric_key not in best_by_key or c.score > best_by_key[c.metric_key].score:
                 best_by_key[c.metric_key] = c
         candidates = sorted(best_by_key.values(), key=lambda x: x.score, reverse=True)
 
-        if candidates:
-            self._intent_boost(q, candidates)
-            candidates = sorted(candidates, key=lambda x: x.score, reverse=True)
+        # intent rerank (no score change)
+        candidates = sorted(candidates, key=lambda x: x.score, reverse=True)
+        self._intent_rerank(q, candidates)
 
-        # 使用归一化后的RAG置信度
-        final_confidence = max(
-            (rag.confidence if rag else 0.0),
-            (rule.confidence if rule else 0.0)
-        )
+        # unified confidence
+        rule_conf = float(rule.confidence) if rule else 0.0
+        final_confidence = max(rag_conf, rule_conf)
 
-        if candidates and final_confidence >= settings.router_conf_ask:
+        # decide clarify
+        needs_clarify = bool(missing)
+        if not needs_clarify and len(candidates) >= 2:
+            gap = abs(candidates[0].score - candidates[1].score)
+            if gap <= 0.03:
+                needs_clarify = True
+
+        if candidates and needs_clarify and final_confidence >= float(settings.router_conf_ask):
             res = MatchResult(
                 route="ASK_CLARIFY",
                 confidence=final_confidence,
@@ -278,7 +293,22 @@ class HybridRouter:
                 candidates=candidates[:5],
                 normalized_query=q,
                 missing_slots=missing,
-                explanations=["低置信度匹配：需要你确认指标或补充条件。"],
+                explanations=["需要你确认指标或补充关键条件（如时间范围/口径）。"],
+            )
+            self.cache[cache_key] = res
+            return res
+
+        # Prefer TEMPLATE if we are confident enough and no missing
+        # (Rule already returned above; here we allow rag_conf to promote TEMPLATE)
+        if candidates and not missing and rag_conf >= float(settings.router_conf_rag):
+            res = MatchResult(
+                route="TEMPLATE",
+                confidence=rag_conf,
+                best_metric=candidates[0].metric_key,
+                candidates=candidates[:5],
+                normalized_query=q,
+                missing_slots=[],
+                explanations=["RAG 高置信命中指标定义（含 top1-gap 校验）"],
             )
             self.cache[cache_key] = res
             return res
@@ -290,64 +320,58 @@ class HybridRouter:
             candidates=candidates[:5],
             normalized_query=q,
             missing_slots=missing,
-            explanations=["未能高置信度匹配到已定义指标，将进入受控探索查询流程。"],
+            explanations=["未能高置信匹配到已定义指标，将进入受控探索查询流程。"],
         )
         self.cache[cache_key] = res
         return res
 
-    def _rule_match(self, q: str) -> Optional[MatchResult]:
-        hits: dict[str, Candidate] = {}  # 使用dict避免重复，保留最高分
+    # -----------------------------
+    # Rule match
+    # -----------------------------
 
-        # 使用配置化的触发关键词进行匹配
+    def _rule_match(self, q: str) -> Optional[MatchResult]:
+        hits: dict[str, Candidate] = {}
+
         for metric_key, trigger_keywords in self._metric_trigger_keywords.items():
             best_score = 0.0
             best_keyword = ""
 
             for keyword in trigger_keywords:
-                # 使用词边界匹配，避免子串误匹配
                 if self._word_boundary_match(q, keyword):
-                    # 检查是否有否定词
-                    if self._has_negative_words(q, keyword):
-                        continue  # 跳过被否定的关键词
+                    # if negated, downweight rather than drop (more stable)
+                    negated = self._has_negative_words(q, keyword)
 
-                    # 动态计算分数：基础分数 + 语义权重
                     base_score = 0.95 if keyword.lower() == metric_key.lower() else 0.92
-
-                    # 语义权重计算
                     semantic_weight = self._calculate_semantic_weight(q, keyword, metric_key)
-                    final_score = base_score + semantic_weight
+                    score = min(1.0, max(0.0, base_score + semantic_weight))
+                    if negated:
+                        score *= 0.7  # keep candidate but penalize
 
-                    if final_score > best_score:
-                        best_score = final_score
+                    if score > best_score:
+                        best_score = score
                         best_keyword = keyword
 
-            # 如果该指标有匹配的关键词，添加到结果中
             if best_score > 0.0:
-                # 检查是否已存在该指标，保留最高分
-                if metric_key not in hits or best_score > hits[metric_key].score:
-                    hits[metric_key] = Candidate(
-                        metric_key=metric_key,
-                        score=best_score,
-                        reason=f"配置化规则命中关键词 {best_keyword}",
-                        missing_slots=[],
-                    )
+                hits[metric_key] = Candidate(
+                    metric_key=metric_key,
+                    score=best_score,
+                    reason=f"规则命中触发词: {best_keyword}",
+                    missing_slots=[],
+                )
 
-        # 如果没有命中任何规则，返回None而不是兜底结果
         if not hits:
             return None
 
-        # 转换为列表并排序
-        hits_list = list(hits.values())
-        hits_list.sort(key=lambda x: x.score, reverse=True)
+        hits_list = sorted(hits.values(), key=lambda x: x.score, reverse=True)
 
-        missing = []
+        missing: list[str] = []
         if not self._has_time(q):
             missing.append("time_range")
 
         route = "TEMPLATE" if not missing else "ASK_CLARIFY"
         return MatchResult(
             route=route,
-            confidence=hits_list[0].score,
+            confidence=hits_list[0].score,  # already 0..1
             best_metric=hits_list[0].metric_key,
             candidates=hits_list[:5],
             normalized_query=q,
@@ -356,77 +380,76 @@ class HybridRouter:
         )
 
     def _calculate_semantic_weight(self, query: str, keyword: str, metric_key: str) -> float:
-        """计算语义权重，提高查询理解准确性"""
         weight = 0.0
 
-        # 1. 关键词位置权重（前面的关键词更重要）
-        keyword_pos = query.find(keyword)
-        if keyword_pos >= 0:
-            # 位置越靠前权重越高
-            position_weight = max(0, (len(query) - keyword_pos) / len(query) * 0.05)
-            weight += position_weight
+        pos = query.find(keyword)
+        if pos >= 0 and len(query) > 0:
+            weight += max(0.0, (len(query) - pos) / len(query) * 0.05)
 
-        # 2. 语义相关性权重
-        # 数量相关查询更倾向于material_bom_count等计数指标
-        if any(count_word in query for count_word in ["最多", "最少", "数量", "个数", "统计"]):
+        if any(w in query for w in ["最多", "最少", "数量", "个数", "统计"]):
             if metric_key in ["material_bom_count", "order_count", "active_projects"]:
                 weight += 0.03
 
-        # 3. 关键词密度权重（一个查询中同一指标关键词越多，权重越高）
-        keyword_density = 0.0
+        dens = 0.0
         for kw in self._metric_trigger_keywords.get(metric_key, []):
             if kw in query:
-                keyword_density += 0.01  # 每个匹配的关键词增加0.01
+                dens += 0.01
+        weight += min(dens, 0.05)
 
-        weight += min(keyword_density, 0.05)  # 最多增加0.05
-
-        # 4. 特殊处理"物料"类关键词的优先级
         if keyword in ["物料", "物料清单", "BOM清单"] and "物料" in query:
             if metric_key == "material_bom_count":
                 weight += 0.04
 
-        # 5. 避免过度权重
-        return min(weight, 0.1)  # 总权重不超过0.1
+        return min(weight, 0.1)
 
-    def _rag_match(self, q: str) -> Optional[MatchResult]:
+    # -----------------------------
+    # RAG candidates + conf (top1-gap)
+    # -----------------------------
+
+    def _rag_candidates_and_conf(self, q: str) -> tuple[list[Candidate], float]:
         hits = retrieve_semantic_assets(q, top_k=8)
-        metric_candidates: list[Candidate] = []
+        if not hits:
+            return [], 0.0
 
+        # collect raw scores by metric, keep best raw score per metric
+        best_raw: dict[str, float] = {}
+        raw_by_metric: dict[str, list[float]] = {}
+        observed: list[float] = []
         for h in hits:
-            if h.kind != "metric":
+            if getattr(h, "kind", None) != "metric":
                 continue
-            mk = h.payload.get("meta", {}).get("metric_key")
+            mk = (h.payload or {}).get("meta", {}).get("metric_key")
             if not mk:
                 continue
-            metric_candidates.append(
+            s = float(getattr(h, "score", 0.0) or 0.0)
+            observed.append(s)
+            raw_by_metric.setdefault(mk, []).append(s)
+
+        if not best_raw:
+            return [], 0.0
+
+        # heuristics: if all scores are >=0 and some > 1, treat as distance (lower better)
+        is_distance = bool(observed) and min(observed) >= 0.0 and max(observed) > 1.0
+        for mk, values in raw_by_metric.items():
+            best_raw[mk] = min(values) if is_distance else max(values)
+
+        # normalize each score to 0..1 so candidates sort is meaningful
+        candidates: list[Candidate] = []
+        scores01: list[float] = []
+        for mk, raw in best_raw.items():
+            s01 = self._normalize_score_to_01(raw)
+            candidates.append(
                 Candidate(
                     metric_key=mk,
-                    score=h.score,
+                    score=s01,
                     reason="RAG 召回指标定义",
                     missing_slots=[],
                 )
             )
+            scores01.append(s01)
 
-        if not metric_candidates:
-            return None
+        candidates.sort(key=lambda x: x.score, reverse=True)
+        scores01_sorted = [c.score for c in candidates]
+        rag_conf = self._rag_conf_with_gap(scores01_sorted)
 
-        metric_candidates.sort(key=lambda x: x.score, reverse=True)
-        best = metric_candidates[0]
-        missing = []
-        if not self._has_time(q):
-            missing.append("time_range")
-
-        route = (
-            "TEMPLATE"
-            if best.score >= settings.router_conf_rag and not missing
-            else ("ASK_CLARIFY" if missing else "CONTROLLED_T2SQL")
-        )
-        return MatchResult(
-            route=route,
-            confidence=best.score,  # 原始分数，后续会归一化
-            best_metric=best.metric_key,
-            candidates=metric_candidates[:5],
-            normalized_query=q,
-            missing_slots=missing,
-            explanations=["RAG 召回到相似指标定义"],
-        )
+        return candidates[:5], rag_conf

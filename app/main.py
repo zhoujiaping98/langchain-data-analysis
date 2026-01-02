@@ -1,14 +1,19 @@
 ﻿from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from .config import settings
 from .layer1_router import HybridRouter
 from .layer2_risk import assess_pre_risk
 from .layer3_controlled_t2sql import controlled_text_to_sql
 from .layer4_feedback import capture_success
 from .template_engine import run_template
 
+
+logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 
 app = FastAPI(title="LangChain 4-Layer Analytics Agent", version="0.1.0")
 

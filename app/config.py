@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     app_port: int = 8000
     chroma_dir: str = ".chroma"
+    log_level: str = "INFO"
 
     # Router thresholds
     router_conf_rule: float = 0.90
@@ -51,6 +52,10 @@ class Settings(BaseSettings):
     risk_max_unions: int = 2
     risk_block_cross_join: bool = True
     risk_block_multiple_statements: bool = True
+
+    # L3 control thresholds
+    l3_min_sql_confidence: float = 0.2
+    l3_require_confirmation_sql_confidence: float = 0.4
 
 
 settings = Settings()
