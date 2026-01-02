@@ -13,6 +13,7 @@ class MetricDef:
     measure_expr: str
     default_filters: str
     allowed_dims: list[str]
+    trigger_keywords: list[str] = None
 
 
 @dataclass

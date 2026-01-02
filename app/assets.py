@@ -32,6 +32,7 @@ def load_seed_metrics() -> list[MetricDef]:
                 measure_expr=m["measure_expr"],
                 default_filters=m.get("default_filters", ""),
                 allowed_dims=m.get("allowed_dims", []),
+                trigger_keywords=m.get("trigger_keywords", []),
             )
         )
     return out
@@ -49,7 +50,7 @@ def list_active_metrics() -> list[MetricDef]:
             text(
                 """
                 SELECT metric_key, metric_name_zh, metric_desc, fact_table, time_column,
-                       measure_expr, default_filters, allowed_dims
+                       measure_expr, default_filters, allowed_dims, trigger_keywords
                 FROM metric_definitions
                 WHERE is_active = 1
                 """
@@ -64,6 +65,14 @@ def list_active_metrics() -> list[MetricDef]:
                 allowed_dims = json.loads(allowed_dims)
             except Exception:
                 allowed_dims = []
+
+        trigger_keywords = r["trigger_keywords"]
+        if isinstance(trigger_keywords, str):
+            try:
+                trigger_keywords = json.loads(trigger_keywords)
+            except Exception:
+                trigger_keywords = []
+
         out.append(
             MetricDef(
                 metric_key=r["metric_key"],
@@ -74,6 +83,7 @@ def list_active_metrics() -> list[MetricDef]:
                 measure_expr=r["measure_expr"],
                 default_filters=r.get("default_filters") or "",
                 allowed_dims=list(allowed_dims) if allowed_dims else [],
+                trigger_keywords=list(trigger_keywords) if trigger_keywords else [],
             )
         )
     return out
@@ -86,7 +96,7 @@ def get_metric(metric_key: str) -> MetricDef | None:
             text(
                 """
                 SELECT metric_key, metric_name_zh, metric_desc, fact_table, time_column,
-                       measure_expr, default_filters, allowed_dims
+                       measure_expr, default_filters, allowed_dims, trigger_keywords
                 FROM metric_definitions
                 WHERE metric_key = :k AND is_active = 1
                 LIMIT 1
@@ -104,6 +114,14 @@ def get_metric(metric_key: str) -> MetricDef | None:
             allowed_dims = json.loads(allowed_dims)
         except Exception:
             allowed_dims = []
+
+    trigger_keywords = r["trigger_keywords"]
+    if isinstance(trigger_keywords, str):
+        try:
+            trigger_keywords = json.loads(trigger_keywords)
+        except Exception:
+            trigger_keywords = []
+
     return MetricDef(
         metric_key=r["metric_key"],
         metric_name_zh=r["metric_name_zh"],
@@ -113,6 +131,7 @@ def get_metric(metric_key: str) -> MetricDef | None:
         measure_expr=r["measure_expr"],
         default_filters=r.get("default_filters") or "",
         allowed_dims=list(allowed_dims) if allowed_dims else [],
+        trigger_keywords=list(trigger_keywords) if trigger_keywords else [],
     )
 
 

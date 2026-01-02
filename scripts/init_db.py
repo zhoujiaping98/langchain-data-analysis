@@ -14,6 +14,7 @@ DDL = [
       measure_expr      TEXT NOT NULL,
       default_filters   TEXT,
       allowed_dims      JSON,
+      trigger_keywords  JSON,
       version           INT DEFAULT 1,
       is_active         TINYINT(1) DEFAULT 1,
       updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -49,6 +50,11 @@ DDL = [
 def main():
     for ddl in DDL:
         execute(ddl)
+    # Backfill missing column if table pre-exists
+    try:
+        execute("ALTER TABLE metric_definitions ADD COLUMN trigger_keywords JSON")
+    except Exception:
+        pass
     print("OK: tables ensured.")
 
 

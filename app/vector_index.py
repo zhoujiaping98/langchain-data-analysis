@@ -12,6 +12,20 @@ from .config import settings
 
 
 def embeddings() -> OpenAIEmbeddings:
+    # 如果没有配置嵌入模型，返回一个模拟的嵌入函数
+    if not settings.embed_base_url or not settings.embed_api_key:
+        class MockEmbeddings:
+            def embed_documents(self, texts):
+                # 返回固定长度的模拟向量
+                import numpy as np
+                return [np.random.rand(1536).tolist() for _ in texts]
+
+            def embed_query(self, text):
+                import numpy as np
+                return np.random.rand(1536).tolist()
+
+        return MockEmbeddings()
+
     if settings.embed_base_url and "dashscope.aliyuncs.com" in settings.embed_base_url:
         try:
             from langchain_community.embeddings import DashScopeEmbeddings

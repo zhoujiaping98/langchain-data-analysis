@@ -1,22 +1,37 @@
 [
   {
-    "term": "成交额",
-    "canonical": "GMV",
-    "definition": "业务口径的成交金额（通常指已支付订单金额）。"
+    "term": "物料清单",
+    "canonical": "BOM",
+    "definition": "物料清单（Bill of Materials）"
   },
   {
-    "term": "流水",
-    "canonical": "GMV",
-    "definition": "常用别名：成交额/GMV。"
+    "term": "BOM表",
+    "canonical": "material_bom_list_info",
+    "definition": "BOM清单信息表"
   },
   {
-    "term": "活跃用户",
-    "canonical": "DAU",
-    "definition": "日活跃用户数。"
+    "term": "采购周期",
+    "canonical": "purchasing_days",
+    "definition": "物料采购所需天数"
   },
   {
-    "term": "订单数",
-    "canonical": "订单量",
-    "definition": "订单数量，通常按已支付订单统计。"
+    "term": "物料种类",
+    "canonical": "material_type",
+    "definition": "物料分类类型"
+  },
+  {
+    "term": "项目复杂度",
+    "canonical": "project_bom_complexity",
+    "definition": "项目BOM清单的物料数量，反映项目复杂度"
+  },
+  {
+    "term": "审批状态",
+    "canonical": "document_status",
+    "definition": "BOM清单的审批流程状态"
+  },
+  {
+    "term": "版本管理",
+    "canonical": "bom_no",
+    "definition": "BOM清单版本编号"
   }
 ]

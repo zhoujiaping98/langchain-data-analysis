@@ -21,6 +21,9 @@ dependencies = [
   "cachetools>=5.4.0",
   "orjson>=3.10.0",
   "rich>=13.7.1",
+  "pysqlite3-binary>=0.5.4.post2; platform_system != 'Windows'",
+  "httpx[socks]>=0.28.1",
+  "numpy>=2.2.6",
 ]
 
 [project.optional-dependencies]

@@ -38,6 +38,8 @@ class ChatResponse(BaseModel):
     explain: list[dict] | None = None
     rows: list[dict] | None = None
     post_risk: dict | None = None
+    is_schema_guided: bool = False  # 是否使用了Schema Prompting
+    sql_confidence: float = 0.0    # SQL生成置信度
 
 
 @app.get("/health")
@@ -121,7 +123,7 @@ def chat(req: ChatRequest):
                 message=f"模板执行失败：{e}",
             )
 
-    # Layer3 controlled t2sql
+    # Layer3 controlled t2sql - 支持无指标查询
     try:
         ep = controlled_text_to_sql(req.query, hinted_metric=m.best_metric)
         return ChatResponse(
@@ -136,6 +138,8 @@ def chat(req: ChatRequest):
             explain=ep.explain,
             rows=ep.rows,
             post_risk=ep.post_risk,
+            is_schema_guided=ep.is_schema_guided,
+            sql_confidence=ep.plan.sql_confidence,
         )
     except Exception as e:
         return ChatResponse(

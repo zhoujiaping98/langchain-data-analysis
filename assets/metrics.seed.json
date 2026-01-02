@@ -1,44 +1,117 @@
 [
   {
-    "metric_key": "gmv",
-    "metric_name_zh": "GMV",
-    "description": "已支付订单总金额（不含退款），用于业务成交额统计。",
-    "fact_table": "orders",
-    "time_column": "paid_at",
-    "measure_expr": "SUM(CASE WHEN status='paid' THEN amount ELSE 0 END)",
-    "default_filters": "status IN ('paid')",
+    "metric_key": "material_bom_count",
+    "metric_name_zh": "BOM物料数量",
+    "description": "物料清单中的物料种类总数，用于生产计划管理。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "COUNT(DISTINCT material_code)",
+    "default_filters": "delete_flag = 0",
     "allowed_dims": [
-      "seller_region",
-      "channel",
-      "dt"
-    ]
+      "project_name",
+      "material_type",
+      "application_type",
+      "document_status",
+      "creator",
+      "author_name"
+    ],
+    "trigger_keywords": ["物料", "BOM", "清单", "物料清单", "BOM清单", "物料数量", "BOM数量"]
   },
   {
-    "metric_key": "order_count",
-    "metric_name_zh": "订单量",
-    "description": "已支付订单数量。",
-    "fact_table": "orders",
-    "time_column": "paid_at",
-    "measure_expr": "COUNT(DISTINCT order_id)",
-    "default_filters": "status IN ('paid')",
+    "metric_key": "bom_versions",
+    "metric_name_zh": "BOM版本数",
+    "description": "不同版本的BOM清单数量，用于版本控制和变更管理。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "COUNT(DISTINCT bom_no)",
+    "default_filters": "delete_flag = 0",
     "allowed_dims": [
-      "seller_region",
-      "channel",
-      "dt"
-    ]
+      "project_name",
+      "application_type",
+      "material_type"
+    ],
+    "trigger_keywords": ["BOM版本", "版本", "版本数", "BOM版本数", "清单版本"]
   },
   {
-    "metric_key": "dau",
-    "metric_name_zh": "DAU",
-    "description": "日活跃用户数（按 events 表的去重用户）。",
-    "fact_table": "events",
-    "time_column": "event_date",
-    "measure_expr": "COUNT(DISTINCT user_id)",
-    "default_filters": "event_name='active'",
+    "metric_key": "material_type_distribution",
+    "metric_name_zh": "物料类型分布",
+    "description": "按物料类型统计的BOM数量分布，用于物料分类管理。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "COUNT(*)",
+    "default_filters": "delete_flag = 0",
     "allowed_dims": [
-      "seller_region",
-      "channel",
-      "event_date"
-    ]
+      "material_type"
+    ],
+    "trigger_keywords": ["物料类型", "类型分布", "物料分类", "类型"]
+  },
+  {
+    "metric_key": "project_bom_complexity",
+    "metric_name_zh": "项目BOM复杂度",
+    "description": "每个项目的BOM清单物料数量，反映项目复杂度。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "COUNT(DISTINCT material_code)",
+    "default_filters": "delete_flag = 0",
+    "allowed_dims": [
+      "project_name"
+    ],
+    "trigger_keywords": ["项目复杂度", "BOM复杂度", "复杂度", "项目"]
+  },
+  {
+    "metric_key": "bom_approval_status",
+    "metric_name_zh": "BOM审批状态",
+    "description": "按文档状态统计的BOM清单数量，用于审批流程监控。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "COUNT(*)",
+    "default_filters": "delete_flag = 0",
+    "allowed_dims": [
+      "document_status",
+      "author_name"
+    ],
+    "trigger_keywords": ["BOM审批", "审批", "审批状态", "文档状态", "审核"]
+  },
+  {
+    "metric_key": "material_purchase_cycle",
+    "metric_name_zh": "物料采购周期",
+    "description": "物料清单中的采购周期统计，用于供应链管理。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "AVG(CAST(purchasing_days AS SIGNED))",
+    "default_filters": "delete_flag = 0 AND purchasing_days IS NOT NULL",
+    "allowed_dims": [
+      "material_type",
+      "project_name"
+    ],
+    "trigger_keywords": ["采购周期", "周期", "采购", "采购时间", "交期"]
+  },
+  {
+    "metric_key": "bom_change_frequency",
+    "metric_name_zh": "BOM变更频率",
+    "description": "按时间周期统计的BOM清单变更数量，用于变更管理。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "update_time",
+    "measure_expr": "COUNT(*)",
+    "default_filters": "delete_flag = 0",
+    "allowed_dims": [
+      "project_name",
+      "creator"
+    ],
+    "trigger_keywords": ["BOM变更", "变更频率", "变更", "变更次数", "频率"]
+  },
+  {
+    "metric_key": "active_projects",
+    "metric_name_zh": "活跃项目数",
+    "description": "有BOM清单的活跃项目数量，用于项目管理。",
+    "fact_table": "material_bom_list_info",
+    "time_column": "create_time",
+    "measure_expr": "COUNT(DISTINCT project_name)",
+    "default_filters": "delete_flag = 0",
+    "allowed_dims": [
+      "application_type",
+      "creator"
+    ],
+    "trigger_keywords": ["活跃项目", "项目数", "项目", "活跃度"]
   }
 ]
