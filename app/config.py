@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     router_conf_rule: float = 0.90
     router_conf_rag: float = 0.80
     router_conf_ask: float = 0.60
+    router_boost_rules: str = ""  # JSON list: [{"metric_key":"...", "keywords":["..."], "weight":0.04}]
 
     # Safety limits
     max_rows: int = 10_000

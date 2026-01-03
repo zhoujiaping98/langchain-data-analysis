@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -83,6 +84,8 @@ class HybridRouter:
             self._count_keywords.update(self._metric_trigger_keywords["order_count"])
         self._count_keywords.update(["数量", "次数", "笔数"])
         self._money_keywords.update(["金额", "总额", "总金额"])
+
+        self._boost_rules = self._load_boost_rules()
 
     # -----------------------------
     # Normalization & helpers
@@ -396,11 +399,43 @@ class HybridRouter:
                 dens += 0.01
         weight += min(dens, 0.05)
 
-        if keyword in ["物料", "物料清单", "BOM清单"] and "物料" in query:
-            if metric_key == "material_bom_count":
-                weight += 0.04
+        weight += self._apply_boost_rules(query, metric_key)
 
         return min(weight, 0.1)
+
+    def _load_boost_rules(self) -> list[dict]:
+        raw = settings.router_boost_rules or ""
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        out: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            metric = item.get("metric_key")
+            keywords = item.get("keywords") or []
+            weight = float(item.get("weight", 0.0))
+            if not metric or not keywords or weight <= 0:
+                continue
+            out.append({"metric_key": metric, "keywords": keywords, "weight": weight})
+        return out
+
+    def _apply_boost_rules(self, query: str, metric_key: str) -> float:
+        if not self._boost_rules:
+            return 0.0
+        q = query or ""
+        for rule in self._boost_rules:
+            if rule["metric_key"] != metric_key:
+                continue
+            for kw in rule["keywords"]:
+                if kw and kw in q:
+                    return float(rule["weight"])
+        return 0.0
 
     # -----------------------------
     # RAG candidates + conf (top1-gap)
