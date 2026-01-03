@@ -18,6 +18,45 @@ class TemplateResult:
     post_risk: dict
 
 
+@dataclass
+class TemplatePreview:
+    sql: str
+    post_risk: dict
+
+
+def build_template_sql(metric_key: str, query: str, limit: int = 1000) -> TemplatePreview:
+    metric = get_metric(metric_key)
+    if not metric:
+        raise ValueError(f"未知指标: {metric_key}")
+
+    tr = infer_time_range(query)
+    if not tr:
+        raise ValueError("模板查询需要明确时间范围（例如：上周/上个月/2025-01-01~2025-01-31）。")
+
+    # 尝试解析查询中的过滤条件和维度
+    allowed_dims = metric.allowed_dims if metric else []
+
+    try:
+        plan = plan_with_llm(query, metric_key, allowed_dims)
+        normalized_filters = _normalize_filters(plan.filters, metric, tr)
+        dimensions = plan.dimensions if plan.dimensions else []
+    except Exception:
+        dimensions = []
+        normalized_filters = []
+
+    sql = compile_metric_sql(
+        metric=metric,
+        time_range=tr,
+        dimensions=dimensions,
+        filters=normalized_filters,
+        limit=limit,
+    )
+    post = assess_post_risk(sql)
+    if post.action == "block":
+        raise ValueError("SQL 风险过高，已阻止执行：" + "; ".join(post.reasons))
+    return TemplatePreview(sql=sql, post_risk=post.__dict__)
+
+
 def run_template(metric_key: str, query: str, limit: int = 1000) -> TemplateResult:
     metric = get_metric(metric_key)
     if not metric:

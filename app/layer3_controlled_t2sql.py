@@ -603,7 +603,9 @@ def generate_sql_from_plan(query: str, plan: QueryPlan) -> str:
     return txt.strip()
 
 
-def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = None) -> ExecutionPlan:
+def controlled_text_to_sql_enhanced(
+    query: str, hinted_metric: Optional[str] = None, execute: bool = True, enforce_confidence: bool = True
+) -> ExecutionPlan:
     """增强版的受控文本转SQL，支持真正的无指标生成"""
     # 必须有时间范围
     tr = infer_time_range(query)
@@ -626,7 +628,7 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
         use_schema=True,  # 启用Schema Prompting
         use_examples=not hinted_metric  # 未配置指标时使用示例
     )
-    if plan.sql_confidence < settings.l3_min_sql_confidence:
+    if enforce_confidence and plan.sql_confidence < settings.l3_min_sql_confidence:
         raise ValueError("SQL 置信度过低，已阻止执行（仅提供意图解析）。")
     schema_info = get_database_schema()
     if plan.suggested_tables:
@@ -683,9 +685,13 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
             reasons=["SQL置信度偏低，需人工确认"],
         )
 
-    # 执行查询
-    exp_rows = explain(sql)
-    rows = fetch_all(sql)
+    if execute:
+        # 执行查询
+        exp_rows = explain(sql)
+        rows = fetch_all(sql)
+    else:
+        exp_rows = []
+        rows = []
 
     return ExecutionPlan(
         sql=sql,
@@ -700,7 +706,11 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
 # 兼容旧接口
 def controlled_text_to_sql(query: str, hinted_metric: str | None = None) -> ExecutionPlan:
     """保持向后兼容的接口，内部使用增强版本"""
-    return controlled_text_to_sql_enhanced(query, hinted_metric)
+    return controlled_text_to_sql_enhanced(query, hinted_metric, execute=True, enforce_confidence=True)
+
+
+def controlled_text_to_sql_preview(query: str, hinted_metric: str | None = None) -> ExecutionPlan:
+    return controlled_text_to_sql_enhanced(query, hinted_metric, execute=False, enforce_confidence=False)
 
 
 def repair_sql_with_llm(sql: str, error: str) -> str:

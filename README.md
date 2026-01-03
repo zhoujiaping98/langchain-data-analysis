@@ -63,6 +63,68 @@ uv run uvicorn app.main:app --reload --port 8000
 - `GET /health`
 - `POST /chat`
 
+### 交互式查询协议（无指标时）
+当无法命中指标时，系统会进入多轮交互，按表/维度/时间逐步确认。
+
+交互步骤：
+1. `ASK_TABLE`：选择表
+2. `ASK_DIMENSION`：选择维度（可空）
+3. `ASK_TIME`：输入时间范围
+4. `ASK_CONFIRM`：确认执行（低置信/高风险也会触发）
+
+### 示例流程
+1) 初始请求：
+```json
+{
+  "user_id": "u_001",
+  "role": "analyst",
+  "query": "最近一个月的订单情况"
+}
+```
+
+2) 选择表：
+```json
+{
+  "session_id": "<session_id>",
+  "action": "select_table",
+  "selection": {"table": "orders"}
+}
+```
+
+3) 选择维度：
+```json
+{
+  "session_id": "<session_id>",
+  "action": "select_dimensions",
+  "selection": {"dimensions": ["status"]}
+}
+```
+
+4) 选择时间：
+```json
+{
+  "session_id": "<session_id>",
+  "action": "select_time",
+  "selection": {"time_range": "上月"}
+}
+```
+
+5) 确认执行：
+```json
+{
+  "session_id": "<session_id>",
+  "action": "confirm_execute",
+  "selection": {"confirm": true}
+}
+```
+
+### 显式交互接口（可选）
+也可以使用独立接口提交选择：
+- `POST /interactive/select_table`
+- `POST /interactive/select_dimensions`
+- `POST /interactive/select_time`
+- `POST /interactive/confirm`
+
 请求示例：
 ```json
 {
