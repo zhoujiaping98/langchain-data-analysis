@@ -10,9 +10,9 @@ def upsert_metric(m):
     execute(
         """
         INSERT INTO metric_definitions
-          (metric_key, metric_name_zh, metric_desc, fact_table, time_column, measure_expr, default_filters, allowed_dims, version, is_active)
+          (metric_key, metric_name_zh, metric_desc, fact_table, time_column, measure_expr, default_filters, allowed_dims, trigger_keywords, version, is_active)
         VALUES
-          (:k, :n, :d, :ft, :tc, :me, :df, :ad, 1, 1)
+          (:k, :n, :d, :ft, :tc, :me, :df, :ad, :tk, 1, 1)
         ON DUPLICATE KEY UPDATE
           metric_name_zh=VALUES(metric_name_zh),
           metric_desc=VALUES(metric_desc),
@@ -21,6 +21,7 @@ def upsert_metric(m):
           measure_expr=VALUES(measure_expr),
           default_filters=VALUES(default_filters),
           allowed_dims=VALUES(allowed_dims),
+          trigger_keywords=VALUES(trigger_keywords),
           is_active=1
         """,
         {
@@ -32,6 +33,7 @@ def upsert_metric(m):
             "me": m.measure_expr,
             "df": m.default_filters,
             "ad": json.dumps(m.allowed_dims, ensure_ascii=False),
+            "tk": json.dumps(m.trigger_keywords, ensure_ascii=False),
         },
     )
 

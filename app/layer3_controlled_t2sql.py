@@ -460,7 +460,9 @@ def _normalize_filters(filters: list[str], metric, time_range: TimeRange | None)
 
 def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
                            allowed_dims: List[str], use_schema: bool = True,
-                           use_examples: bool = True) -> QueryPlan:
+                           use_examples: bool = True,
+                           forced_tables: Optional[List[str]] = None,
+                           selected_fields: Optional[List[str]] = None) -> QueryPlan:
     """增强的LLM查询解析，支持Schema Prompting和Few-shot Learning"""
     llm = get_llm()
     tr = infer_time_range(query)
@@ -484,7 +486,9 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
     if use_schema:
         schema_info_full = get_database_schema()
         prompt_schema = schema_info_full
-        if not hinted_metric:
+        if forced_tables:
+            prompt_schema = _filter_schema(schema_info_full, forced_tables)
+        elif not hinted_metric:
             candidate_tables = route_tables(query, schema_info_full, top_k=1)
             if candidate_tables:
                 prompt_schema = _filter_schema(schema_info_full, candidate_tables)
@@ -497,6 +501,8 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
         "hinted_metric": hinted_metric,
         "allowed_dimensions": allowed_dims,
         "time_range_hint": tr.label if tr else None,
+        "forced_tables": forced_tables or [],
+        "selected_fields": selected_fields or [],
     }
 
     # 如果启用Few-shot Learning，添加示例
@@ -556,10 +562,13 @@ def plan_with_llm_enhanced(query: str, hinted_metric: Optional[str],
     if use_schema:
         schema_info = schema_info_full or get_database_schema()
         available_tables = set(schema_info["tables"].keys())
-        if qp.suggested_tables:
-            qp.suggested_tables = [t for t in qp.suggested_tables if t in available_tables]
-        if not qp.suggested_tables:
-            qp.suggested_tables = route_tables(query, schema_info, top_k=1)
+        if forced_tables:
+            qp.suggested_tables = [t for t in forced_tables if t in available_tables]
+        else:
+            if qp.suggested_tables:
+                qp.suggested_tables = [t for t in qp.suggested_tables if t in available_tables]
+            if not qp.suggested_tables:
+                qp.suggested_tables = route_tables(query, schema_info, top_k=1)
 
     qp.limit = min(int(qp.limit or 1000), settings.max_rows)
 
@@ -603,7 +612,14 @@ def generate_sql_from_plan(query: str, plan: QueryPlan) -> str:
     return txt.strip()
 
 
-def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = None) -> ExecutionPlan:
+def controlled_text_to_sql_enhanced(
+    query: str,
+    hinted_metric: Optional[str] = None,
+    forced_tables: Optional[List[str]] = None,
+    allowed_dims_override: Optional[List[str]] = None,
+    execute_query: bool = True,
+    forced_filters: Optional[List[str]] = None,
+) -> ExecutionPlan:
     """增强版的受控文本转SQL，支持真正的无指标生成"""
     # 必须有时间范围
     tr = infer_time_range(query)
@@ -617,6 +633,8 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
         metric = get_metric(hinted_metric)
         if metric:
             allowed_dims = metric.allowed_dims
+    if allowed_dims_override:
+        allowed_dims = list(allowed_dims_override)
 
     # 使用增强的LLM解析
     plan = plan_with_llm_enhanced(
@@ -624,8 +642,12 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
         hinted_metric=hinted_metric,
         allowed_dims=allowed_dims,
         use_schema=True,  # 启用Schema Prompting
-        use_examples=not hinted_metric  # 未配置指标时使用示例
+        use_examples=not hinted_metric,  # 未配置指标时使用示例
+        forced_tables=forced_tables,
+        selected_fields=allowed_dims_override,
     )
+    if forced_filters:
+        plan.filters = list(forced_filters) + list(plan.filters or [])
     if plan.sql_confidence < settings.l3_min_sql_confidence:
         raise ValueError("SQL 置信度过低，已阻止执行（仅提供意图解析）。")
     schema_info = get_database_schema()
@@ -684,8 +706,8 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
         )
 
     # 执行查询
-    exp_rows = explain(sql)
-    rows = fetch_all(sql)
+    exp_rows = explain(sql) if execute_query else []
+    rows = fetch_all(sql) if execute_query else []
 
     return ExecutionPlan(
         sql=sql,
@@ -698,9 +720,29 @@ def controlled_text_to_sql_enhanced(query: str, hinted_metric: Optional[str] = N
 
 
 # 兼容旧接口
-def controlled_text_to_sql(query: str, hinted_metric: str | None = None) -> ExecutionPlan:
+def controlled_text_to_sql(
+    query: str,
+    hinted_metric: str | None = None,
+    forced_tables: Optional[List[str]] = None,
+    allowed_dims_override: Optional[List[str]] = None,
+    execute_query: bool = True,
+    forced_filters: Optional[List[str]] = None,
+) -> ExecutionPlan:
     """保持向后兼容的接口，内部使用增强版本"""
-    return controlled_text_to_sql_enhanced(query, hinted_metric)
+    return controlled_text_to_sql_enhanced(
+        query,
+        hinted_metric,
+        forced_tables=forced_tables,
+        allowed_dims_override=allowed_dims_override,
+        execute_query=execute_query,
+        forced_filters=forced_filters,
+    )
+
+
+def run_sql(sql: str) -> tuple[list[dict], list[dict]]:
+    exp_rows = explain(sql)
+    rows = fetch_all(sql)
+    return exp_rows, rows
 
 
 def repair_sql_with_llm(sql: str, error: str) -> str:
@@ -764,8 +806,11 @@ def _filter_is_safe(expr: str) -> bool:
     disallowed = (exp.Or, exp.Subquery, exp.Select, exp.Union, exp.Join, exp.Case)
     if any(where.find_all(disallowed)):
         return False
-    allowed = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In, exp.Like, exp.Between, exp.Is, exp.IsNot)
-    if not any(where.find_all(allowed)):
+    allowed = [exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In, exp.Like, exp.Between, exp.Is]
+    is_not = getattr(exp, "IsNot", None)
+    if isinstance(is_not, type):
+        allowed.append(is_not)
+    if not any(where.find_all(tuple(allowed))):
         return False
     return True
 

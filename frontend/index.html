@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Data Agent Studio</title>
+    <link rel="stylesheet" href="style.css?v=2" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-grid"></div>
+
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">Δ</span>
+        <div class="brand-text">
+          <h1>Data Agent Studio</h1>
+          <p>流式查询 · 智能协作 · 可控分析</p>
+        </div>
+      </div>
+      <div class="status-pill" id="statusPill">就绪</div>
+    </header>
+
+    <main class="app-shell">
+      <section class="panel conversation">
+        <div class="panel-head">
+          <h2>对话</h2>
+          <div class="panel-actions">
+            <button id="clearBtn" class="ghost-btn">清空</button>
+          </div>
+        </div>
+        <div id="chatList" class="chat-list"></div>
+        <div class="composer">
+          <textarea id="queryInput" placeholder="例如：上周GMV按渠道统计" rows="2"></textarea>
+          <div class="composer-actions">
+            <button id="sendBtn" class="primary-btn">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel inspector">
+        <div class="panel-head">
+          <h2>运行快照</h2>
+        </div>
+        <div class="snapshot">
+          <div class="snapshot-block">
+            <h3>路由</h3>
+            <pre id="routeSnapshot">等待请求…</pre>
+          </div>
+          <div class="snapshot-block">
+            <h3>SQL</h3>
+            <pre id="sqlSnapshot">等待生成…</pre>
+          </div>
+          <div class="snapshot-block">
+            <h3>风险</h3>
+            <pre id="riskSnapshot">等待评估…</pre>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <span>Streaming output powered by the 4-layer pipeline.</span>
+    </footer>
+
+    <script src="app.js?v=2"></script>
+  </body>
+</html>
